@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Portal Clone</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
+        canvas { display: block; }
+        #crosshair {
+            position: absolute;
+            top: 50%; left: 50%;
+            width: 20px; height: 20px;
+            border: 2px solid white;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            mix-blend-mode: difference;
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px; left: 20px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="instructions">
+        WASD to Move | SPACE to Jump<br>
+        LEFT CLICK: Blue Portal | RIGHT CLICK: Orange Portal<br>
+        Click screen to capture mouse!
+    </div>
+
+    <!-- Import Three.js via CDN -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        // --- Configuration ---
+        const PORTAL_WIDTH = 2;
+        const PORTAL_HEIGHT = 3;
+        const PLAYER_HEIGHT = 1.8;
+        const GRAVITY = 30;
+        const JUMP_FORCE = 10;
+        const MOVE_SPEED = 40;
+
+        // --- Core Variables ---
+        let scene, camera, renderer, controls;
+        let bluePortal, orangePortal;
+        let blueTarget, orangeTarget; // Render targets for "window" effect
+        let blueCam, orangeCam;       // Virtual cameras
+        
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        const clock = new THREE.Clock();
+        const raycaster = new THREE.Raycaster();
+        
+        const walls = []; // For collision and portal placement
+
+        init();
+        animate();
+
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = PLAYER_HEIGHT;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.localClippingEnabled = true; // Crucial for portal rendering
+            document.body.appendChild(renderer.domElement);
+
+            // 2. Lights
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const pointLight = new THREE.PointLight(0xffffff, 150);
+            pointLight.position.set(0, 10, 0);
+            scene.add(pointLight);
+
+            // 3. Controls
+            controls = new PointerLockControls(camera, document.body);
+            document.body.addEventListener('click', () => controls.lock());
+
+            // 4. Create Test Chamber
+            createRoom();
+
+            // 5. Initialize Portals
+            bluePortal = createPortal(0x0088ff);
+            orangePortal = createPortal(0xff8800);
+            scene.add(bluePortal.mesh, orangePortal.mesh);
+
+            // Setup Render Targets for recursive view
+            blueTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight);
+            orangeTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight);
+            
+            blueCam = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            orangeCam = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // 6. Shooting Logic
+            window.addEventListener('mousedown', (e) => {
+                if (!controls.isLocked) return;
+                
+                raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+                const intersects = raycaster.intersectObjects(walls);
+
+                if (intersects.length > 0) {
+                    const hit = intersects[0];
+                    const portal = (e.button === 0) ? bluePortal : orangePortal;
+                    placePortal(portal, hit);
+                }
+            });
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function createRoom() {
+            const material = new THREE.MeshPhongMaterial({ color: 0x444444, side: THREE.DoubleSide });
+            const floorMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
+            
+            // Floor
+            const floor = new THREE.Mesh(new THREE.BoxGeometry(20, 0.1, 20), floorMat);
+            floor.position.y = -0.05;
+            scene.add(floor);
+            walls.push(floor);
+
+            // Ceiling
+            const ceil = new THREE.Mesh(new THREE.BoxGeometry(20, 0.1, 20), material);
+            ceil.position.y = 10;
+            scene.add(ceil);
+            walls.push(ceil);
+
+            // Walls
+            const wallData = [
+                { pos: [0, 5, -10], rot: [0, 0, 0], size: [20, 10, 0.1] },
+                { pos: [0, 5, 10], rot: [0, 0, 0], size: [20, 10, 0.1] },
+                { pos: [-10, 5, 0], rot: [0, Math.PI/2, 0], size: [20, 10, 0.1] },
+                { pos: [10, 5, 0], rot: [0, Math.PI/2, 0], size: [20, 10, 0.1] }
+            ];
+
+            wallData.forEach(data => {
+                const wall = new THREE.Mesh(new THREE.BoxGeometry(...data.size), material);
+                wall.position.set(...data.pos);
+                wall.rotation.set(...data.rot);
+                scene.add(wall);
+                walls.push(wall);
+            });
+        }
+
+        function createPortal(color) {
+            const group = new THREE.Group();
+            
+            // The "surface" of the portal that shows the other side
+            const planeGeom = new THREE.PlaneGeometry(PORTAL_WIDTH, PORTAL_HEIGHT);
+            const planeMat = new THREE.MeshBasicMaterial({ color: 0xffffff }); // Will be replaced by RenderTarget
+            const mesh = new THREE.Mesh(planeGeom, planeMat);
+            
+            // The glowing border
+            const borderGeom = new THREE.TorusGeometry(PORTAL_HEIGHT/2, 0.05, 16, 32);
+            const borderMat = new THREE.MeshBasicMaterial({ color: color });
+            const border = new THREE.Mesh(borderGeom, borderMat);
+            border.scale.set(0.6, 1, 1);
+            
+            group.add(mesh);
+            group.add(border);
+            
+            // Start hidden/inactive far away
+            group.position.set(0, -10, 0); 
+            
+            return { mesh: group, surface: mesh, active: false, color: color };
+        }
+
+        function placePortal(portal, hit) {
+            portal.active = true;
+            portal.mesh.position.copy(hit.point);
+            
+            // Align portal to the surface normal
+            const lookAtPoint = hit.point.clone().add(hit.face.normal);
+            portal.mesh.lookAt(lookAtPoint);
+            
+            // Nudge slightly out to prevent Z-fighting
+            portal.mesh.position.add(hit.face.normal.clone().multiplyScalar(0.01));
+        }
+
+        /**
+         * CORE PORTAL MATH:
+         * To show the other side, we place a virtual camera relative to the "exit" portal
+         * exactly where the player is relative to the "entry" portal.
+         */
+        function updatePortalView(srcPortal, dstPortal, dstTarget, virtualCam) {
+            if (!srcPortal.active || !dstPortal.active) return;
+
+            // 1. Calculate the view matrix for the virtual camera
+            // We get the player's world matrix and map it to the dest portal's space
+            const srcMat = srcPortal.mesh.matrixWorld;
+            const dstMat = dstPortal.mesh.matrixWorld;
+            
+            // Create the transformation matrix: 
+            // Inv(Source) -> Rotate 180 (to face out) -> Destination
+            let m = new THREE.Matrix4()
+                .copy(srcMat).invert()
+                .premultiply(new THREE.Matrix4().makeRotationY(Math.PI))
+                .premultiply(dstMat);
+
+            virtualCam.projectionMatrix.copy(camera.projectionMatrix);
+            virtualCam.matrixAutoUpdate = false;
+            virtualCam.matrix.copy(camera.matrixWorld).premultiply(m);
+            virtualCam.matrixWorldNeedsUpdate = true;
+
+            // Render
+            srcPortal.surface.visible = false; // Hide surface so camera doesn't see its own texture
+            renderer.setRenderTarget(dstTarget);
+            renderer.render(scene, virtualCam);
+            renderer.setRenderTarget(null);
+            srcPortal.surface.visible = true;
+
+            srcPortal.surface.material.map = dstTarget.texture;
+        }
+
+        function checkTeleport() {
+            if (!bluePortal.active || !orangePortal.active) return;
+
+            const portals = [
+                { in: bluePortal, out: orangePortal },
+                { in: orangePortal, out: bluePortal }
+            ];
+
+            portals.forEach(p => {
+                const distance = camera.position.distanceTo(p.in.mesh.position);
+                if (distance < 1.5) { // Simple radius check
+                    
+                    // Logic: Transform position and velocity using Portal Matrix
+                    const mIn = p.in.mesh.matrixWorld;
+                    const mOut = p.out.mesh.matrixWorld;
+
+                    // 1. Transform Position
+                    const relativePos = camera.position.clone().applyMatrix4(mIn.clone().invert());
+                    relativePos.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI); // Flip 180
+                    const newPos = relativePos.applyMatrix4(mOut);
+                    camera.position.copy(newPos);
+
+                    // 2. Transform Velocity (Momentum Conservation)
+                    // We extract only the rotation component of the transformation matrix
+                    const mInInv = new THREE.Matrix4().extractRotation(mIn).invert();
+                    const mOutRot = new THREE.Matrix4().extractRotation(mOut);
+                    const rot180 = new THREE.Matrix4().makeRotationY(Math.PI);
+                    
+                    velocity.applyMatrix4(mInInv).applyMatrix4(rot180).applyMatrix4(mOutRot);
+
+                    // 3. Transform Camera Rotation (so you don't look the wrong way)
+                    // This is a bit tricky with PointerLockControls, so we adjust the orientation
+                    const dummy = new THREE.Object3D();
+                    dummy.quaternion.copy(camera.quaternion);
+                    dummy.applyMatrix4(mInInv).applyMatrix4(rot180).applyMatrix4(mOutRot);
+                    camera.quaternion.copy(dummy.quaternion);
+                }
+            });
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            if (controls.isLocked) {
+                // --- Physics & Movement ---
+                velocity.y -= GRAVITY * delta; // Gravity
+
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * MOVE_SPEED * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * MOVE_SPEED * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+                camera.position.y += velocity.y * delta;
+
+                // Simple Floor Collision
+                if (camera.position.y < PLAYER_HEIGHT) {
+                    velocity.y = 0;
+                    camera.position.y = PLAYER_HEIGHT;
+                    canJump = true;
+                }
+
+                // Drag/Friction
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+
+                checkTeleport();
+            }
+
+            // --- Portal Rendering ---
+            // Render the "cameras" inside the portals
+            const currentRenderTarget = renderer.getRenderTarget();
+            updatePortalView(bluePortal, orangePortal, orangeTarget, orangeCam);
+            updatePortalView(orangePortal, bluePortal, blueTarget, blueCam);
+            renderer.setRenderTarget(currentRenderTarget);
+
+            renderer.render(scene, camera);
+        }
+
+        // --- Input Handling ---
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        const onKeyDown = (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = true; break;
+                case 'KeyA': moveLeft = true; break;
+                case 'KeyS': moveBackward = true; break;
+                case 'KeyD': moveRight = true; break;
+                case 'Space': if (canJump) velocity.y += JUMP_FORCE; canJump = false; break;
+            }
+        };
+        const onKeyUp = (e) => {
+            switch (e.code) {
+                case 'KeyW': moveForward = false; break;
+                case 'KeyA': moveLeft = false; break;
+                case 'KeyS': moveBackward = false; break;
+                case 'KeyD': moveRight = false; break;
+            }
+        };
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+    </script>
+</body>
+</html>
